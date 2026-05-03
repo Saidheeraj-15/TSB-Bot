@@ -326,4 +326,4 @@ if __name__ == "__main__":
     if not BOT_TOKEN:
         print("❌  DISCORD_BOT_TOKEN not set!")
         exit(1)
-    bot.run(DISCORD_BOT_TOKEN)
+    bot.run(BOT_TOKEN)
