@@ -6,10 +6,9 @@ import os
 import asyncio
 from datetime import datetime, timezone, timedelta
 
-load_dotenv()
-TOKEN = os.getenv("DISCORD_TOKEN")
+
 # ── CONFIG ────────────────────────────────────────────────────────────────────
-#BOT_TOKEN  = os.environ.get("DISCORD_BOT_TOKEN", "")
+BOT_TOKEN  = os.environ.get("DISCORD_BOT_TOKEN", "")
 DATA_FILE  = "alarms.json"
 IST        = timezone(timedelta(hours=5, minutes=30))
 DAY_NAMES  = ["Mon", "Tue", "Wed", "Thu", "Fri", "Sat", "Sun"]
@@ -327,4 +326,4 @@ if __name__ == "__main__":
     if not BOT_TOKEN:
         print("❌  DISCORD_BOT_TOKEN not set!")
         exit(1)
-    bot.run(DISCORD_TOKEN)
+    bot.run(DISCORD_BOT_TOKEN)
