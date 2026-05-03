@@ -260,6 +260,109 @@ async def panel_error(interaction: discord.Interaction, error):
     await interaction.response.send_message("❌ You need **Manage Channels** permission.", ephemeral=True)
 
 
+# ── ADMIN PANEL ───────────────────────────────────────────────────────────────
+
+class AdminDeleteSelect(discord.ui.Select):
+    """Dropdown listing every alarm across all users for admin deletion."""
+    def __init__(self, entries: list):
+        # entries = list of (uid, alarm) tuples
+        self.entries = {f"{uid}:{a['id']}": (uid, a) for uid, a in entries}
+        options = []
+        for key, (uid, a) in self.entries.items():
+            days_label = "Daily" if len(a["days"]) == 7 else "/".join(a["days"])
+            options.append(discord.SelectOption(
+                label=f"[{a['_username']}] #{a['id']} — {a['hour']:02d}:{a['minute']:02d} ({days_label})",
+                description=a["message"][:50],
+                value=key,
+                emoji="🗑️",
+            ))
+        super().__init__(
+            placeholder="Select alarm(s) to delete...",
+            min_values=1,
+            max_values=min(len(options), 25),
+            options=options[:25],
+        )
+
+    async def callback(self, interaction: discord.Interaction):
+        alarms = load_alarms()
+        deleted = 0
+        for key in self.values:
+            uid, alarm = self.entries[key]
+            before = len(alarms.get(uid, []))
+            alarms[uid] = [a for a in alarms.get(uid, []) if a["id"] != alarm["id"]]
+            deleted += before - len(alarms[uid])
+        save_alarms(alarms)
+        await interaction.response.send_message(
+            f"🗑️ Deleted **{deleted}** alarm(s) successfully.", ephemeral=True
+        )
+        self.view.stop()
+
+
+class AdminDeleteView(discord.ui.View):
+    def __init__(self, entries: list):
+        super().__init__(timeout=60)
+        self.add_item(AdminDeleteSelect(entries))
+
+
+@bot.tree.command(name="adminpanel", description="View and manage all users' alarms (admin only)")
+@app_commands.checks.has_permissions(administrator=True)
+async def admin_panel(interaction: discord.Interaction):
+    await interaction.response.defer(ephemeral=True)
+
+    alarms = load_alarms()
+    if not alarms:
+        await interaction.followup.send("📭 No alarms set by any user yet.", ephemeral=True)
+        return
+
+    # Build embed showing all alarms grouped by user
+    embed = discord.Embed(
+        title="🛡️ Admin — All Alarms",
+        color=0xED4245,
+        timestamp=datetime.now(timezone.utc),
+    )
+
+    all_entries = []   # (uid, alarm) for delete dropdown
+    total = 0
+
+    for uid, user_alarms in alarms.items():
+        if not user_alarms:
+            continue
+        # Try to resolve username
+        try:
+            user = await bot.fetch_user(int(uid))
+            username = f"{user.display_name} (@{user.name})"
+        except Exception:
+            username = f"Unknown ({uid})"
+
+        lines = []
+        for a in user_alarms:
+            days_label = "Every Day" if len(a["days"]) == 7 else ", ".join(a["days"])
+            lines.append(f"`#{a['id']}` — **{a['hour']:02d}:{a['minute']:02d} IST** — {days_label}\n💬 {a['message']}")
+            a["_username"] = user.name if hasattr(user, "name") else uid
+            all_entries.append((uid, a))
+            total += 1
+
+        embed.add_field(
+            name=f"👤 {username}",
+            value="\n\n".join(lines),
+            inline=False,
+        )
+
+    embed.set_footer(text=f"Total: {total} alarm(s) across {len(alarms)} user(s)")
+
+    # Send embed + delete button if there are alarms
+    if all_entries:
+        view = AdminDeleteView(all_entries)
+        await interaction.followup.send(embed=embed, view=view, ephemeral=True)
+    else:
+        await interaction.followup.send(embed=embed, ephemeral=True)
+
+
+@admin_panel.error
+async def admin_panel_error(interaction: discord.Interaction, error):
+    await interaction.response.send_message("❌ You need **Administrator** permission.", ephemeral=True)
+
+
 # ── ALARM CHECKER ─────────────────────────────────────────────────────────────
 
 @tasks.loop(minutes=1)
