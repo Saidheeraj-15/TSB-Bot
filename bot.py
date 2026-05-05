@@ -1,23 +1,21 @@
 import discord
 from discord.ext import commands, tasks
 from discord import app_commands
-import os, asyncio, json
+import os, asyncio, json, io
 from datetime import datetime, timezone, timedelta
-from supabase import create_client, Client
+import httpx
 
 # ── CONFIG ────────────────────────────────────────────────────────────────────
-BOT_TOKEN   = os.environ.get("DISCORD_BOT_TOKEN", "")
-SUPABASE_URL = os.environ.get("SUPABASE_URL", "")
+BOT_TOKEN    = os.environ.get("DISCORD_BOT_TOKEN", "")
+SUPABASE_URL = os.environ.get("SUPABASE_URL", "").rstrip("/")
 SUPABASE_KEY = os.environ.get("SUPABASE_KEY", "")
-ADMIN_ID     = int(os.environ.get("ADMIN_USER_ID", "0"))  # your Discord user ID
+ADMIN_ID     = int(os.environ.get("ADMIN_USER_ID", "0"))
 
 IST       = timezone(timedelta(hours=5, minutes=30))
 DAY_NAMES = ["Mon", "Tue", "Wed", "Thu", "Fri", "Sat", "Sun"]
 
-print(f"🔍 Token:    {'✅' if BOT_TOKEN   else '❌'}")
+print(f"🔍 Token:    {'✅' if BOT_TOKEN    else '❌'}")
 print(f"🔍 Supabase: {'✅' if SUPABASE_URL else '❌'}")
-
-db: Client = create_client(SUPABASE_URL, SUPABASE_KEY)
 # ─────────────────────────────────────────────────────────────────────────────
 
 intents = discord.Intents.default()
@@ -27,44 +25,70 @@ bot = commands.Bot(command_prefix="!", intents=intents)
 
 
 # ══════════════════════════════════════════════════════════════════════════════
-# DATABASE HELPERS
+# DATABASE — httpx calls to Supabase REST API (no SDK)
 # ══════════════════════════════════════════════════════════════════════════════
 
+HEADERS = {
+    "apikey":        SUPABASE_KEY,
+    "Authorization": f"Bearer {SUPABASE_KEY}",
+    "Content-Type":  "application/json",
+    "Prefer":        "return=representation",
+}
+
+def _url(table: str) -> str:
+    return f"{SUPABASE_URL}/rest/v1/{table}"
+
+def db_get(table: str, params: dict) -> list:
+    with httpx.Client() as c:
+        r = c.get(_url(table), headers=HEADERS, params=params)
+        r.raise_for_status()
+        return r.json() or []
+
+def db_insert(table: str, data: dict):
+    with httpx.Client() as c:
+        r = c.post(_url(table), headers=HEADERS, json=data)
+        r.raise_for_status()
+
+def db_delete(table: str, params: dict):
+    with httpx.Client() as c:
+        r = c.delete(_url(table), headers=HEADERS, params=params)
+        r.raise_for_status()
+
+def db_patch(table: str, params: dict, data: dict):
+    with httpx.Client() as c:
+        r = c.patch(_url(table), headers=HEADERS, params=params, json=data)
+        r.raise_for_status()
+
+# ── Alarm helpers ─────────────────────────────────────────────────────────────
 def get_alarms(uid: str) -> list:
-    res = db.table("alarms").select("*").eq("user_id", uid).execute()
-    return res.data or []
+    return db_get("alarms", {"user_id": f"eq.{uid}", "select": "*"})
 
 def get_all_alarms() -> list:
-    res = db.table("alarms").select("*").execute()
-    return res.data or []
+    return db_get("alarms", {"select": "*"})
 
 def add_alarm(uid: str, hour: int, minute: int, days: list, message: str):
-    db.table("alarms").insert({
-        "user_id": uid, "hour": hour, "minute": minute,
-        "days": days, "message": message, "active": True
-    }).execute()
+    db_insert("alarms", {"user_id": uid, "hour": hour, "minute": minute,
+                          "days": days, "message": message, "active": True})
 
 def delete_alarm(alarm_id: int):
-    db.table("alarms").delete().eq("id", alarm_id).execute()
+    db_delete("alarms", {"id": f"eq.{alarm_id}"})
 
+# ── Schedule helpers ──────────────────────────────────────────────────────────
 def get_schedules(uid: str) -> list:
-    res = db.table("schedules").select("*").eq("user_id", uid).eq("fired", False).execute()
-    return res.data or []
+    return db_get("schedules", {"user_id": f"eq.{uid}", "fired": "eq.false", "select": "*"})
 
 def get_all_schedules() -> list:
-    res = db.table("schedules").select("*").eq("fired", False).execute()
-    return res.data or []
+    return db_get("schedules", {"fired": "eq.false", "select": "*"})
 
 def add_schedule(uid: str, timestamp: float, message: str):
-    db.table("schedules").insert({
-        "user_id": uid, "timestamp": timestamp, "message": message, "fired": False
-    }).execute()
+    db_insert("schedules", {"user_id": uid, "timestamp": timestamp,
+                             "message": message, "fired": False})
 
 def delete_schedule(schedule_id: int):
-    db.table("schedules").delete().eq("id", schedule_id).execute()
+    db_delete("schedules", {"id": f"eq.{schedule_id}"})
 
 def mark_fired(schedule_id: int):
-    db.table("schedules").update({"fired": True}).eq("id", schedule_id).execute()
+    db_patch("schedules", {"id": f"eq.{schedule_id}"}, {"fired": True})
 
 
 # ══════════════════════════════════════════════════════════════════════════════
@@ -107,10 +131,14 @@ class SetAlarmModal(discord.ui.Modal, title="Set Your Alarm"):
         except:
             return await interaction.response.send_message(
                 "❌ Invalid time. Use HH:MM e.g. `08:00`", ephemeral=True)
-
-        uid  = str(interaction.user.id)
-        days = ["Mon","Tue","Wed","Thu","Fri","Sat","Sun"] if "daily" in self.days else list(self.days)
-        add_alarm(uid, h, m, days, self.message_input.value.strip())
+        try:
+            uid  = str(interaction.user.id)
+            days = ["Mon","Tue","Wed","Thu","Fri","Sat","Sun"] if "daily" in self.days else list(self.days)
+            add_alarm(uid, h, m, days, self.message_input.value.strip())
+        except Exception as ex:
+            print(f"❌ add_alarm error: {ex}")
+            return await interaction.response.send_message(
+                "❌ Failed to save alarm. Please try again.", ephemeral=True)
 
         e = discord.Embed(title="✅ Alarm Set", color=0x57F287)
         e.add_field(name="Time",    value=f"`{h:02d}:{m:02d} IST`", inline=True)
@@ -127,7 +155,8 @@ class DayPickerSelect(discord.ui.Select):
             ("Wednesday","Wed"),("Thursday","Thu"),("Friday","Fri"),
             ("Saturday","Sat"),("Sunday","Sun")]]
         super().__init__(placeholder="Select day(s)...", min_values=1, max_values=8, options=opts)
-    async def callback(self, interaction):
+
+    async def callback(self, interaction: discord.Interaction):
         await interaction.response.send_modal(SetAlarmModal(self.values))
 
 class DayPickerView(discord.ui.View):
@@ -137,18 +166,27 @@ class DayPickerView(discord.ui.View):
 class AlarmDeleteSelect(discord.ui.Select):
     def __init__(self, user_alarms):
         opts = [discord.SelectOption(
-            label=f"#{a['id']} — {a['hour']:02d}:{a['minute']:02d} IST ({days_label(a['days']) if len(a['days'])!=7 else 'Daily'})",
+            label=f"#{a['id']} — {a['hour']:02d}:{a['minute']:02d} IST ({'Daily' if len(a['days'])==7 else '/'.join(a['days'])})",
             description=a["message"][:50], value=str(a["id"])) for a in user_alarms]
         super().__init__(placeholder="Select alarm(s) to delete...",
                          min_values=1, max_values=len(opts), options=opts)
-    async def callback(self, interaction):
-        for aid in self.values: delete_alarm(int(aid))
+
+    async def callback(self, interaction: discord.Interaction):
+        try:
+            for aid in self.values:
+                delete_alarm(int(aid))
+        except Exception as ex:
+            print(f"❌ delete_alarm error: {ex}")
+            return await interaction.response.send_message(
+                "❌ Failed to delete. Please try again.", ephemeral=True)
         await interaction.response.send_message(
             f"🗑️ Deleted **{len(self.values)}** alarm(s).", ephemeral=True)
         self.view.stop()
 
 class AlarmDeleteView(discord.ui.View):
-    def __init__(self, user_alarms): super().__init__(timeout=60); self.add_item(AlarmDeleteSelect(user_alarms))
+    def __init__(self, user_alarms):
+        super().__init__(timeout=60)
+        self.add_item(AlarmDeleteSelect(user_alarms))
 
 
 class AlarmPanelView(discord.ui.View):
@@ -158,34 +196,43 @@ class AlarmPanelView(discord.ui.View):
                        emoji="⏰", custom_id="alarm:set")
     async def set_alarm(self, interaction: discord.Interaction, button: discord.ui.Button):
         await interaction.response.send_message(
-            embed=discord.Embed(title="⏰ New Alarm", description="Choose the day(s) first.", color=0x5865F2),
+            embed=discord.Embed(title="⏰ New Alarm",
+                                description="Choose the day(s) first.", color=0x5865F2),
             view=DayPickerView(), ephemeral=True)
 
     @discord.ui.button(label="My Alarms", style=discord.ButtonStyle.secondary,
                        emoji="📋", custom_id="alarm:list")
     async def my_alarms(self, interaction: discord.Interaction, button: discord.ui.Button):
-        uid = str(interaction.user.id)
-        alarms = get_alarms(uid)
+        await interaction.response.defer(ephemeral=True)
+        try:
+            uid = str(interaction.user.id)
+            alarms = get_alarms(uid)
+        except Exception as ex:
+            print(f"❌ get_alarms error: {ex}")
+            return await interaction.followup.send("❌ Failed to fetch alarms.", ephemeral=True)
         if not alarms:
-            return await interaction.response.send_message(
-                "📭 You have no alarms yet.", ephemeral=True)
+            return await interaction.followup.send("📭 You have no alarms yet.", ephemeral=True)
         e = discord.Embed(title="📋 Your Alarms", color=0x5865F2)
         for a in alarms:
             e.add_field(
                 name=f"#{a['id']}  •  {a['hour']:02d}:{a['minute']:02d} IST  •  {days_label(a['days'])}",
                 value=f"💬 {a['message']}", inline=False)
         e.set_footer(text=f"{len(alarms)} active alarm(s)")
-        await interaction.response.send_message(embed=e, ephemeral=True)
+        await interaction.followup.send(embed=e, ephemeral=True)
 
     @discord.ui.button(label="Delete Alarm", style=discord.ButtonStyle.danger,
                        emoji="🗑️", custom_id="alarm:delete")
     async def delete_alarms(self, interaction: discord.Interaction, button: discord.ui.Button):
-        uid = str(interaction.user.id)
-        alarms = get_alarms(uid)
+        await interaction.response.defer(ephemeral=True)
+        try:
+            uid = str(interaction.user.id)
+            alarms = get_alarms(uid)
+        except Exception as ex:
+            print(f"❌ get_alarms error: {ex}")
+            return await interaction.followup.send("❌ Failed to fetch alarms.", ephemeral=True)
         if not alarms:
-            return await interaction.response.send_message(
-                "📭 You have no alarms to delete.", ephemeral=True)
-        await interaction.response.send_message(
+            return await interaction.followup.send("📭 No alarms to delete.", ephemeral=True)
+        await interaction.followup.send(
             embed=discord.Embed(title="🗑️ Delete Alarms", color=0xED4245),
             view=AlarmDeleteView(alarms), ephemeral=True)
 
@@ -226,9 +273,13 @@ class ScheduleModal(discord.ui.Modal, title="One-Time Reminder"):
         if target <= datetime.now(IST):
             return await interaction.response.send_message(
                 "❌ That date/time is already in the past.", ephemeral=True)
-
-        uid = str(interaction.user.id)
-        add_schedule(uid, target.timestamp(), self.message_input.value.strip())
+        try:
+            uid = str(interaction.user.id)
+            add_schedule(uid, target.timestamp(), self.message_input.value.strip())
+        except Exception as ex:
+            print(f"❌ add_schedule error: {ex}")
+            return await interaction.response.send_message(
+                "❌ Failed to save reminder. Please try again.", ephemeral=True)
 
         e = discord.Embed(title="✅ Reminder Scheduled", color=0x57F287)
         e.add_field(name="Date",     value=f"`{day:02d}/{month:02d}/{year} {h:02d}:{m:02d} IST`", inline=True)
@@ -245,14 +296,23 @@ class ScheduleDeleteSelect(discord.ui.Select):
             description=s["message"][:50], value=str(s["id"])) for s in user_schedules]
         super().__init__(placeholder="Select reminder(s) to delete...",
                          min_values=1, max_values=len(opts), options=opts)
-    async def callback(self, interaction):
-        for sid in self.values: delete_schedule(int(sid))
+
+    async def callback(self, interaction: discord.Interaction):
+        try:
+            for sid in self.values:
+                delete_schedule(int(sid))
+        except Exception as ex:
+            print(f"❌ delete_schedule error: {ex}")
+            return await interaction.response.send_message(
+                "❌ Failed to delete. Please try again.", ephemeral=True)
         await interaction.response.send_message(
             f"🗑️ Deleted **{len(self.values)}** reminder(s).", ephemeral=True)
         self.view.stop()
 
 class ScheduleDeleteView(discord.ui.View):
-    def __init__(self, user_schedules): super().__init__(timeout=60); self.add_item(ScheduleDeleteSelect(user_schedules))
+    def __init__(self, user_schedules):
+        super().__init__(timeout=60)
+        self.add_item(ScheduleDeleteSelect(user_schedules))
 
 
 class SchedulePanelView(discord.ui.View):
@@ -266,10 +326,15 @@ class SchedulePanelView(discord.ui.View):
     @discord.ui.button(label="My Reminders", style=discord.ButtonStyle.secondary,
                        emoji="📋", custom_id="schedule:list")
     async def list_schedules(self, interaction: discord.Interaction, button: discord.ui.Button):
-        uid = str(interaction.user.id)
-        schedules = get_schedules(uid)
+        await interaction.response.defer(ephemeral=True)
+        try:
+            uid = str(interaction.user.id)
+            schedules = get_schedules(uid)
+        except Exception as ex:
+            print(f"❌ get_schedules error: {ex}")
+            return await interaction.followup.send("❌ Failed to fetch reminders.", ephemeral=True)
         if not schedules:
-            return await interaction.response.send_message(
+            return await interaction.followup.send(
                 "📭 You have no upcoming reminders.", ephemeral=True)
         e = discord.Embed(title="📋 Your Reminders", color=0x5865F2)
         for s in schedules:
@@ -278,17 +343,21 @@ class SchedulePanelView(discord.ui.View):
                 name=f"#{s['id']}  •  {dt.strftime('%d/%m/%Y %H:%M IST')}  •  ⏳ {time_until(dt)}",
                 value=f"💬 {s['message']}", inline=False)
         e.set_footer(text=f"{len(schedules)} pending reminder(s)")
-        await interaction.response.send_message(embed=e, ephemeral=True)
+        await interaction.followup.send(embed=e, ephemeral=True)
 
     @discord.ui.button(label="Delete Reminder", style=discord.ButtonStyle.danger,
                        emoji="🗑️", custom_id="schedule:delete")
     async def delete_schedule(self, interaction: discord.Interaction, button: discord.ui.Button):
-        uid = str(interaction.user.id)
-        schedules = get_schedules(uid)
+        await interaction.response.defer(ephemeral=True)
+        try:
+            uid = str(interaction.user.id)
+            schedules = get_schedules(uid)
+        except Exception as ex:
+            print(f"❌ get_schedules error: {ex}")
+            return await interaction.followup.send("❌ Failed to fetch reminders.", ephemeral=True)
         if not schedules:
-            return await interaction.response.send_message(
-                "📭 No reminders to delete.", ephemeral=True)
-        await interaction.response.send_message(
+            return await interaction.followup.send("📭 No reminders to delete.", ephemeral=True)
+        await interaction.followup.send(
             embed=discord.Embed(title="🗑️ Delete Reminders", color=0xED4245),
             view=ScheduleDeleteView(schedules), ephemeral=True)
 
@@ -304,7 +373,7 @@ class AdminAlarmDeleteSelect(discord.ui.Select):
             description=a["message"][:50], value=str(a["id"])) for a in alarms[:25]]
         super().__init__(placeholder="Delete repeating alarm(s)...",
                          min_values=1, max_values=len(opts), options=opts)
-    async def callback(self, interaction):
+    async def callback(self, interaction: discord.Interaction):
         for aid in self.values: delete_alarm(int(aid))
         await interaction.response.send_message(
             f"🗑️ Deleted **{len(self.values)}** alarm(s).", ephemeral=True)
@@ -317,7 +386,7 @@ class AdminScheduleDeleteSelect(discord.ui.Select):
             description=s["message"][:50], value=str(s["id"])) for s in schedules[:25]]
         super().__init__(placeholder="Delete one-time reminder(s)...",
                          min_values=1, max_values=len(opts), options=opts)
-    async def callback(self, interaction):
+    async def callback(self, interaction: discord.Interaction):
         for sid in self.values: delete_schedule(int(sid))
         await interaction.response.send_message(
             f"🗑️ Deleted **{len(self.values)}** reminder(s).", ephemeral=True)
@@ -366,15 +435,17 @@ async def schedule_error(interaction, error):
 @app_commands.checks.has_permissions(administrator=True)
 async def admin_panel(interaction: discord.Interaction):
     await interaction.response.defer(ephemeral=True)
-
-    all_alarms    = get_all_alarms()
-    all_schedules = get_all_schedules()
+    try:
+        all_alarms    = get_all_alarms()
+        all_schedules = get_all_schedules()
+    except Exception as ex:
+        print(f"❌ adminpanel fetch error: {ex}")
+        return await interaction.followup.send("❌ Failed to fetch data from database.", ephemeral=True)
 
     if not all_alarms and not all_schedules:
         return await interaction.followup.send(
             "📭 No data yet. Users haven't set any alarms or reminders.", ephemeral=True)
 
-    # Resolve usernames
     uid_cache = {}
     async def get_username(uid: str) -> tuple:
         if uid in uid_cache: return uid_cache[uid]
@@ -385,7 +456,7 @@ async def admin_panel(interaction: discord.Interaction):
             uid_cache[uid] = (f"Unknown ({uid})", uid)
         return uid_cache[uid]
 
-    # ── Repeating alarms ──────────────────────────────────────────────────────
+    # Repeating alarms
     if all_alarms:
         e1 = discord.Embed(title="⏰ All Repeating Alarms", color=0xED4245)
         grouped = {}
@@ -403,7 +474,7 @@ async def admin_panel(interaction: discord.Interaction):
         e1.set_footer(text=f"{len(all_alarms)} alarm(s) total")
         await interaction.followup.send(embed=e1, view=AdminAlarmDeleteView(annotated), ephemeral=True)
 
-    # ── One-time schedules ────────────────────────────────────────────────────
+    # One-time schedules
     if all_schedules:
         e2 = discord.Embed(title="📅 All One-Time Reminders", color=0xEB459E)
         grouped2 = {}
@@ -428,7 +499,7 @@ async def admin_panel_error(interaction, error):
 
 
 # ══════════════════════════════════════════════════════════════════════════════
-# AUTO DAILY BACKUP → DMs admin
+# AUTO DAILY BACKUP
 # ══════════════════════════════════════════════════════════════════════════════
 
 @tasks.loop(hours=24)
@@ -441,24 +512,20 @@ async def daily_backup():
         now  = datetime.now(IST).strftime("%d/%m/%Y %H:%M IST")
         e = discord.Embed(title="🗄️ Daily Backup", color=0x57F287,
                           description=f"Auto-backup at {now}")
-        e.add_field(name="⏰ Repeating Alarms",    value=f"`{len(alarms)}` entries",    inline=True)
-        e.add_field(name="📅 One-Time Reminders",  value=f"`{len(schedules)}` entries", inline=True)
-        await user.send(embed=e,
-            files=[
-                discord.File(fp=__import__("io").BytesIO(
-                    json.dumps(alarms, indent=2).encode()), filename="alarms.json"),
-                discord.File(fp=__import__("io").BytesIO(
-                    json.dumps(schedules, indent=2).encode()), filename="schedules.json"),
-            ])
-        print("✅ Daily backup sent to admin.")
+        e.add_field(name="⏰ Repeating Alarms",   value=f"`{len(alarms)}` entries",    inline=True)
+        e.add_field(name="📅 One-Time Reminders", value=f"`{len(schedules)}` entries", inline=True)
+        await user.send(embed=e, files=[
+            discord.File(fp=io.BytesIO(json.dumps(alarms,    indent=2).encode()), filename="alarms.json"),
+            discord.File(fp=io.BytesIO(json.dumps(schedules, indent=2).encode()), filename="schedules.json"),
+        ])
+        print("✅ Daily backup sent.")
     except Exception as ex:
         print(f"❌ Backup failed: {ex}")
 
 @daily_backup.before_loop
 async def before_backup():
     await bot.wait_until_ready()
-    # Wait until next 00:00 IST
-    now  = datetime.now(IST)
+    now = datetime.now(IST)
     next_midnight = now.replace(hour=0, minute=0, second=0, microsecond=0) + timedelta(days=1)
     await asyncio.sleep((next_midnight - now).total_seconds())
 
@@ -473,33 +540,37 @@ async def check_alarms():
     now_day = DAY_NAMES[now_ist.weekday()]
     now_h, now_m = now_ist.hour, now_ist.minute
 
-    # Repeating alarms
-    for a in get_all_alarms():
-        if a["hour"] == now_h and a["minute"] == now_m and now_day in a["days"]:
-            try:
-                user = await bot.fetch_user(int(a["user_id"]))
-                e = discord.Embed(title="⏰ Alarm!", description=a["message"],
-                                  color=0xFEE75C, timestamp=datetime.now(timezone.utc))
-                e.set_footer(text=f"Alarm #{a['id']}  •  {now_h:02d}:{now_m:02d} IST")
-                await user.send(embed=e)
-                print(f"✅ Alarm #{a['id']} → {a['user_id']}")
-            except discord.Forbidden: print(f"⚠️ Cannot DM {a['user_id']}")
-            except Exception as ex:   print(f"❌ {ex}")
+    try:
+        for a in get_all_alarms():
+            if a["hour"] == now_h and a["minute"] == now_m and now_day in a["days"]:
+                try:
+                    user = await bot.fetch_user(int(a["user_id"]))
+                    e = discord.Embed(title="⏰ Alarm!", description=a["message"],
+                                      color=0xFEE75C, timestamp=datetime.now(timezone.utc))
+                    e.set_footer(text=f"Alarm #{a['id']}  •  {now_h:02d}:{now_m:02d} IST")
+                    await user.send(embed=e)
+                    print(f"✅ Alarm #{a['id']} → {a['user_id']}")
+                except discord.Forbidden: print(f"⚠️ Cannot DM {a['user_id']}")
+                except Exception as ex:   print(f"❌ {ex}")
+    except Exception as ex:
+        print(f"❌ check_alarms error: {ex}")
 
-    # One-time schedules
-    for s in get_all_schedules():
-        target = datetime.fromtimestamp(s["timestamp"], tz=IST)
-        if target.date() == now_ist.date() and target.hour == now_h and target.minute == now_m:
-            try:
-                user = await bot.fetch_user(int(s["user_id"]))
-                e = discord.Embed(title="📅 Reminder!", description=s["message"],
-                                  color=0xEB459E, timestamp=datetime.now(timezone.utc))
-                e.set_footer(text=f"Reminder #{s['id']}  •  {target.strftime('%d/%m/%Y %H:%M IST')}")
-                await user.send(embed=e)
-                print(f"✅ Schedule #{s['id']} → {s['user_id']}")
-            except discord.Forbidden: print(f"⚠️ Cannot DM {s['user_id']}")
-            except Exception as ex:   print(f"❌ {ex}")
-            finally: mark_fired(s["id"])
+    try:
+        for s in get_all_schedules():
+            target = datetime.fromtimestamp(s["timestamp"], tz=IST)
+            if target.date() == now_ist.date() and target.hour == now_h and target.minute == now_m:
+                try:
+                    user = await bot.fetch_user(int(s["user_id"]))
+                    e = discord.Embed(title="📅 Reminder!", description=s["message"],
+                                      color=0xEB459E, timestamp=datetime.now(timezone.utc))
+                    e.set_footer(text=f"Reminder #{s['id']}  •  {target.strftime('%d/%m/%Y %H:%M IST')}")
+                    await user.send(embed=e)
+                    print(f"✅ Schedule #{s['id']} → {s['user_id']}")
+                except discord.Forbidden: print(f"⚠️ Cannot DM {s['user_id']}")
+                except Exception as ex:   print(f"❌ {ex}")
+                finally: mark_fired(s["id"])
+    except Exception as ex:
+        print(f"❌ check_schedules error: {ex}")
 
 @check_alarms.before_loop
 async def before_check():
