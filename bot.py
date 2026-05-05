@@ -7,7 +7,7 @@ import httpx
 
 # ── CONFIG ────────────────────────────────────────────────────────────────────
 BOT_TOKEN    = os.environ.get("DISCORD_BOT_TOKEN", "")
-SUPABASE_URL = os.environ.get("SUPABASE_URL", "").rstrip("/")
+SUPABASE_URL = os.environ.get("SUPABASE_URL", "").rstrip("/").removesuffix("/rest/v1")
 SUPABASE_KEY = os.environ.get("SUPABASE_KEY", "")
 ADMIN_ID     = int(os.environ.get("ADMIN_USER_ID", "0"))
 
