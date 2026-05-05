@@ -41,22 +41,26 @@ def _url(table: str) -> str:
 def db_get(table: str, params: dict) -> list:
     with httpx.Client() as c:
         r = c.get(_url(table), headers=HEADERS, params=params)
+        print(f"GET {table} {params} -> {r.status_code}: {r.text[:300]}")
         r.raise_for_status()
         return r.json() or []
 
 def db_insert(table: str, data: dict):
     with httpx.Client() as c:
         r = c.post(_url(table), headers=HEADERS, json=data)
+        print(f"POST {table} {data} -> {r.status_code}: {r.text[:300]}")
         r.raise_for_status()
 
 def db_delete(table: str, params: dict):
     with httpx.Client() as c:
         r = c.delete(_url(table), headers=HEADERS, params=params)
+        print(f"DELETE {table} {params} -> {r.status_code}: {r.text[:300]}")
         r.raise_for_status()
 
 def db_patch(table: str, params: dict, data: dict):
     with httpx.Client() as c:
         r = c.patch(_url(table), headers=HEADERS, params=params, json=data)
+        print(f"PATCH {table} {params} -> {r.status_code}: {r.text[:300]}")
         r.raise_for_status()
 
 # ── Alarm helpers ─────────────────────────────────────────────────────────────
