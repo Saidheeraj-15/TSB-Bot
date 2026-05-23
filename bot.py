@@ -663,7 +663,7 @@ async def focus_session(member: discord.Member):
         description="Good luck with your task! Your focus session has begun!",
         color=0x57F287
     )
-    e.set_footer(text="Focus Mode • Session: 50 mins")
+    e.set_footer(text="Focus Mode")
     await safe_dm(member, embed=e)
 
     elapsed = 0
