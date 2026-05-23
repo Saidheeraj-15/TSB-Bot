@@ -659,8 +659,8 @@ async def focus_session(member: discord.Member):
 
     # ── PHASE 2: Focus Session (50 mins) ─────────────────────────────────────
     e = discord.Embed(
-        title="✅ Focus Session Started!",
-        description="Great! Your **50 minute focus session** has begun.\nKeep your camera or screen share on. You got this! 💪",
+        title="✅ Thank You for Turning On!",
+        description="Good luck with your task! Your focus session has begun!",
         color=0x57F287
     )
     e.set_footer(text="Focus Mode • Session: 50 mins")
