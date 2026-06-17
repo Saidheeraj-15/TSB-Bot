@@ -732,20 +732,28 @@ async def on_voice_state_update(member: discord.Member, before: discord.VoiceSta
 
 @bot.event
 async def on_ready():
+    print("ON_READY FIRED")
+
     bot.add_view(AlarmPanelView())
     bot.add_view(SchedulePanelView())
+
     print(f"✅ Logged in as {bot.user} ({bot.user.id})")
-    print(f"📡 Focus Mode watching VC: {FOCUS_VC_ID}")
+
+    await setup_leaderboard(bot)
+    await setup_admin(bot)
+
+    print("COMMANDS BEFORE SYNC:")
+    for cmd in bot.tree.get_commands():
+        print(f" - {cmd.name}")
+
     try:
         synced = await bot.tree.sync()
         print(f"✅ Synced {len(synced)} slash command(s)")
     except Exception as e:
         print(f"❌ Sync failed: {e}")
+
     check_alarms.start()
     daily_backup.start()
-    await setup_leaderboard(bot)
-    await setup_admin(bot)
-
 if __name__ == "__main__":
     if not BOT_TOKEN:
         print("❌ DISCORD_BOT_TOKEN not set!")
