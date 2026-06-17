@@ -4,6 +4,8 @@ from discord import app_commands
 import os, asyncio, json, io
 from datetime import datetime, timezone, timedelta
 import httpx
+from leaderboard import session_join, session_leave, setup_leaderboard, STUDY_CATEGORY_ID
+from admin_commands import setup_admin
 
 # ── CONFIG ────────────────────────────────────────────────────────────────────
 BOT_TOKEN    = os.environ.get("DISCORD_BOT_TOKEN", "")
@@ -469,7 +471,6 @@ async def admin_panel(interaction: discord.Interaction):
             uid_cache[uid] = (f"Unknown ({uid})", uid)
         return uid_cache[uid]
 
-    # Repeating alarms
     if all_alarms:
         e1 = discord.Embed(title="⏰ All Repeating Alarms", color=0xED4245)
         grouped = {}
@@ -487,7 +488,6 @@ async def admin_panel(interaction: discord.Interaction):
         e1.set_footer(text=f"{len(all_alarms)} alarm(s) total")
         await interaction.followup.send(embed=e1, view=AdminAlarmDeleteView(annotated), ephemeral=True)
 
-    # One-time schedules
     if all_schedules:
         e2 = discord.Embed(title="📅 All One-Time Reminders", color=0xEB459E)
         grouped2 = {}
@@ -595,38 +595,26 @@ async def before_check():
 # FOCUS MODE
 # ══════════════════════════════════════════════════════════════════════════════
 
-# Tracks each member's focus session
-# { member_id: asyncio.Task }
 focus_tasks: dict[int, asyncio.Task] = {}
 
-
 def has_cam_or_screen(member: discord.Member) -> bool:
-    """Returns True if member has camera or screen share active."""
     if member.voice is None:
         return False
     return member.voice.self_video or member.voice.self_stream
 
-
 async def safe_dm(member: discord.Member, message: str = None, embed: discord.Embed = None):
-    """Send a DM safely, ignore if DMs are closed."""
     try:
         await member.send(content=message, embed=embed)
     except discord.Forbidden:
         pass
 
-
 async def kick_from_vc(member: discord.Member):
-    """Disconnect member from VC silently."""
     try:
         await member.move_to(None)
     except discord.HTTPException:
         pass
 
-
 async def focus_session(member: discord.Member):
-    """Main focus mode loop for a single member."""
-
-    # ── PHASE 1: Grace Period (1 min) ────────────────────────────────────────
     e = discord.Embed(
         title="📚 Focus Mode Active",
         description=(
@@ -638,123 +626,100 @@ async def focus_session(member: discord.Member):
     )
     e.set_footer(text="Focus Mode • Grace Period: 1 min")
     await safe_dm(member, embed=e)
-
     await asyncio.sleep(GRACE_PERIOD)
 
-    # Check still in VC
     if member.voice is None or member.voice.channel.id != FOCUS_VC_ID:
-        focus_tasks.pop(member.id, None)
-        return
+        focus_tasks.pop(member.id, None); return
 
     if not has_cam_or_screen(member):
-        e = discord.Embed(
-            title="❌ Removed from Study VC",
+        e = discord.Embed(title="❌ Removed from Study VC",
             description="You didn't turn on your **camera or screen share** within 1 minute.\nRejoin when you're ready! 📚",
-            color=0xED4245
-        )
+            color=0xED4245)
         await safe_dm(member, embed=e)
         await kick_from_vc(member)
-        focus_tasks.pop(member.id, None)
-        return
+        focus_tasks.pop(member.id, None); return
 
-    # ── PHASE 2: Focus Session (50 mins) ─────────────────────────────────────
-    e = discord.Embed(
-        title="✅ Thank You for Turning On!",
-        description="Good luck with your task! Your focus session has begun!",
-        color=0x57F287
-    )
-    e.set_footer(text="Focus Mode")
+    e = discord.Embed(title="✅ Thank You for Turning On!",
+        description="Good luck with your task! 🍀\nYour **50 minute focus session** has begun — we'll check back with you soon.",
+        color=0x57F287)
+    e.set_footer(text="Focus Mode • Session: 50 mins")
     await safe_dm(member, embed=e)
 
     elapsed = 0
     while elapsed < FOCUS_DURATION:
         await asyncio.sleep(30)
         elapsed += 30
-
-        # Left VC on their own
         if member.voice is None or member.voice.channel.id != FOCUS_VC_ID:
-            focus_tasks.pop(member.id, None)
-            return
-
+            focus_tasks.pop(member.id, None); return
         if not has_cam_or_screen(member):
-            e = discord.Embed(
-                title="❌ Removed from Study VC",
+            e = discord.Embed(title="❌ Removed from Study VC",
                 description="Your **camera and screen share** were both turned off during the session.\nRejoin when you're ready to focus again! 📚",
-                color=0xED4245
-            )
+                color=0xED4245)
             await safe_dm(member, embed=e)
             await kick_from_vc(member)
-            focus_tasks.pop(member.id, None)
-            return
+            focus_tasks.pop(member.id, None); return
 
-    # ── PHASE 3: Break (10 mins) ──────────────────────────────────────────────
-    e = discord.Embed(
-        title="🎉 50 Minutes Done! Break Time.",
+    e = discord.Embed(title="🎉 50 Minutes Done! Break Time.",
         description=(
             "Amazing work! You've completed a full **50 minute focus session**.\n\n"
             "😌 You have **10 minutes** to relax — camera/screen share can be off.\n"
             "⏰ You'll get a reminder **2 minutes before** your break ends."
-        ),
-        color=0x5865F2
-    )
+        ), color=0x5865F2)
     e.set_footer(text="Focus Mode • Break: 10 mins")
     await safe_dm(member, embed=e)
 
-    # Wait 8 mins then warn
     await asyncio.sleep(BREAK_DURATION - BREAK_WARNING)
 
     if member.voice is None or member.voice.channel.id != FOCUS_VC_ID:
-        focus_tasks.pop(member.id, None)
-        return
+        focus_tasks.pop(member.id, None); return
 
-    e = discord.Embed(
-        title="⚠️ Break Ending Soon!",
+    e = discord.Embed(title="⚠️ Break Ending Soon!",
         description="You have **2 minutes left** in your break.\nPlease turn on your **camera or screen share** before time's up!",
-        color=0xFEE75C
-    )
+        color=0xFEE75C)
     e.set_footer(text="Focus Mode • 2 mins remaining")
     await safe_dm(member, embed=e)
 
     await asyncio.sleep(BREAK_WARNING)
 
     if member.voice is None or member.voice.channel.id != FOCUS_VC_ID:
-        focus_tasks.pop(member.id, None)
-        return
+        focus_tasks.pop(member.id, None); return
 
     if not has_cam_or_screen(member):
-        e = discord.Embed(
-            title="❌ Removed from Study VC",
+        e = discord.Embed(title="❌ Removed from Study VC",
             description="Your break ended and your **camera/screen share** was still off.\nRejoin to start a fresh session! 📚",
-            color=0xED4245
-        )
+            color=0xED4245)
         await safe_dm(member, embed=e)
         await kick_from_vc(member)
-        focus_tasks.pop(member.id, None)
-        return
+        focus_tasks.pop(member.id, None); return
 
-    # ── Restart cycle ─────────────────────────────────────────────────────────
-    e = discord.Embed(
-        title="🔁 Starting New Session!",
+    e = discord.Embed(title="🔁 Starting New Session!",
         description="Back to focus! Another **50 minute session** begins now. Let's go! 💪",
-        color=0x57F287
-    )
+        color=0x57F287)
     await safe_dm(member, embed=e)
-
-    # Re-create task to avoid deep recursion on long sessions
     task = asyncio.create_task(focus_session(member))
     focus_tasks[member.id] = task
 
 
+# ══════════════════════════════════════════════════════════════════════════════
+# VOICE STATE — focus mode + study hour tracking
+# ══════════════════════════════════════════════════════════════════════════════
+
 @bot.event
 async def on_voice_state_update(member: discord.Member, before: discord.VoiceState, after: discord.VoiceState):
-    # Joined the watched VC
+    # ── Study hour tracking (category-based) ─────────────────────────────────
+    in_study_after  = after.channel  and after.channel.category_id  == STUDY_CATEGORY_ID
+    in_study_before = before.channel and before.channel.category_id == STUDY_CATEGORY_ID
+    if in_study_after and not in_study_before:
+        session_join(member.id)
+    elif in_study_before and not in_study_after:
+        session_leave(member.id)
+
+    # ── Focus mode ────────────────────────────────────────────────────────────
     if after.channel and after.channel.id == FOCUS_VC_ID:
         if before.channel is None or before.channel.id != FOCUS_VC_ID:
             if member.id not in focus_tasks:
                 task = asyncio.create_task(focus_session(member))
                 focus_tasks[member.id] = task
-
-    # Left the watched VC
     elif before.channel and before.channel.id == FOCUS_VC_ID:
         task = focus_tasks.pop(member.id, None)
         if task:
@@ -778,6 +743,8 @@ async def on_ready():
         print(f"❌ Sync failed: {e}")
     check_alarms.start()
     daily_backup.start()
+    await setup_leaderboard(bot)
+    await setup_admin(bot)
 
 if __name__ == "__main__":
     if not BOT_TOKEN:
