@@ -35,8 +35,8 @@ def db_get(table: str, params: dict) -> list:
 def seconds_to_hm(seconds: int) -> str:
     h = seconds // 3600
     m = (seconds % 3600) // 60
-    if h and m:   return f"{h}h {m}m"
-    elif h:       return f"{h}h"
+    if h >= 10:   return f"{h}h"
+    elif h:       return f"{h}h {m}m"
     else:         return f"{m}m"
 
 
