@@ -142,6 +142,6 @@ def setup_admin_commands(bot):
 # SETUP — called from bot.py
 # ══════════════════════════════════════════════════════════════════════════════
 
-async async def setup_admin(bot):
+async def setup_admin(bot):
     setup_admin_commands(bot)
     print("✅ Admin commands module loaded")
