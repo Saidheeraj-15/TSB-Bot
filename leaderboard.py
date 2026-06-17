@@ -429,8 +429,7 @@ def setup_commands(bot):
                 except:
                     name = f"<@{uid}>"
                 w_lines.append(f"`{i+1}.` **{name}** — `{seconds_to_hm(secs)}`")
-            e1.description = "
-".join(w_lines) if w_lines else "No data yet."
+            e1.description = "\n".join(w_lines) if w_lines else "No data yet."
             e1.set_footer(text=f"Week {iso[1]}, {iso[0]} • {len(weekly_sorted)} members")
 
             # ── Build monthly embed ───────────────────────────────────────────
@@ -447,8 +446,7 @@ def setup_commands(bot):
                 except:
                     name = f"<@{uid}>"
                 m_lines.append(f"`{i+1}.` **{name}** — `{seconds_to_hm(secs)}`")
-            e2.description = "
-".join(m_lines) if m_lines else "No data yet."
+            e2.description = "\n".join(m_lines) if m_lines else "No data yet."
             e2.set_footer(text=f"{now.strftime('%B %Y')} • {len(monthly_sorted)} members")
 
             await interaction.followup.send(embeds=[e1, e2], ephemeral=True)
