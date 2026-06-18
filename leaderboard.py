@@ -164,7 +164,7 @@ def seconds_to_hm(seconds: int) -> str:
         return f"{m}m"
 
 
-async def build_leaderboard_embed(bot, entries: list, title: str, period: str) -> discord.Embed:
+async def build_leaderboard_embed(bot, entries: list, title: str, period: str, kind=None) -> discord.Embed:
     e = discord.Embed(title=title, color=0x5865F2,
                       timestamp=datetime.now(timezone.utc))
     e.set_footer(text=f"Period: {period}")
