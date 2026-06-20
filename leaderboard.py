@@ -18,10 +18,11 @@ SUPABASE_URL = os.environ.get("SUPABASE_URL", "").rstrip("/").removesuffix("/res
 SUPABASE_KEY = os.environ.get("SUPABASE_KEY", "")
 
 HEADERS = {
-    "apikey":        SUPABASE_KEY,
-    "Authorization": f"Bearer {SUPABASE_KEY}",
-    "Content-Type":  "application/json",
-    "Prefer":        "return=representation",
+    "apikey":         SUPABASE_KEY,
+    "Authorization":  f"Bearer {SUPABASE_KEY}",
+    "Content-Type":   "application/json",
+    "Prefer":         "return=representation",
+    "Cache-Control":  "no-cache",
 }
 
 def _url(table: str) -> str:
@@ -137,6 +138,9 @@ def upsert_study_seconds(user_id: str, seconds: int):
 active_sessions: dict[int, datetime] = {}
 
 def session_join(member_id: int):
+    # If already in session (VC switch), save previous session first
+    if member_id in active_sessions:
+        session_leave(member_id)
     active_sessions[member_id] = datetime.now(IST)
 
 def session_leave(member_id: int):
@@ -144,8 +148,19 @@ def session_leave(member_id: int):
         return
     joined_at = active_sessions.pop(member_id)
     seconds = int((datetime.now(IST) - joined_at).total_seconds())
-    if seconds > 0:
-        upsert_study_seconds(str(member_id), seconds)
+    if seconds < 10:  # ignore sessions under 10 seconds (accidental joins)
+        return
+    # Retry up to 3 times if Supabase fails
+    for attempt in range(3):
+        try:
+            upsert_study_seconds(str(member_id), seconds)
+            print(f"✅ Session saved: {member_id} — {seconds}s")
+            return
+        except Exception as ex:
+            print(f"⚠️ Session save attempt {attempt+1} failed: {ex}")
+            import time
+            time.sleep(1)
+    print(f"❌ Failed to save session for {member_id} after 3 attempts")
 
 
 # ══════════════════════════════════════════════════════════════════════════════
@@ -243,6 +258,29 @@ async def before_scheduler():
     import asyncio
     now = datetime.now(IST)
     await asyncio.sleep(60 - now.second)
+
+
+@tasks.loop(minutes=10)
+async def periodic_session_save():
+    """Save active sessions every 10 mins so hours aren't lost on restart."""
+    if not active_sessions:
+        return
+    now = datetime.now(IST)
+    for member_id, joined_at in list(active_sessions.items()):
+        seconds = int((now - joined_at).total_seconds())
+        if seconds < 60:
+            continue
+        try:
+            upsert_study_seconds(str(member_id), seconds)
+            # Reset their join time to now so we don't double count
+            active_sessions[member_id] = now
+            print(f"✅ Periodic save: {member_id} — {seconds}s")
+        except Exception as ex:
+            print(f"⚠️ Periodic save failed for {member_id}: {ex}")
+
+@periodic_session_save.before_loop
+async def before_periodic():
+    await bot_ref.wait_until_ready()
 
 
 # ══════════════════════════════════════════════════════════════════════════════
@@ -412,4 +450,5 @@ async def setup_leaderboard(bot):
     bot_ref = bot
     setup_commands(bot)
     leaderboard_scheduler.start()
+    periodic_session_save.start()
     print("✅ Leaderboard module loaded")
