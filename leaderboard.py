@@ -9,11 +9,10 @@ from datetime import datetime, timezone, timedelta
 # ── CONFIG ─────────────────────────────────────────────────────────────────────
 LEADERBOARD_CHANNEL_ID  = 1424749944882991114
 GUILD_ID                = 1419384274376982540
-STUDY_CATEGORY_ID       = 1424091569446850682  # Only VCs in this category are tracked
+STUDY_CATEGORY_ID       = 1424091569446850682
 
 IST = timezone(timedelta(hours=5, minutes=30))
 
-# Supabase config (imported from bot.py environment)
 import os
 SUPABASE_URL = os.environ.get("SUPABASE_URL", "").rstrip("/").removesuffix("/rest/v1")
 SUPABASE_KEY = os.environ.get("SUPABASE_KEY", "")
@@ -39,8 +38,13 @@ def db_get(table: str, params: dict) -> list:
         r.raise_for_status()
         return r.json() or []
 
+def db_insert(table: str, data: dict):
+    with httpx.Client() as c:
+        r = c.post(_url(table), headers=HEADERS, json=data)
+        r.raise_for_status()
+
 def db_upsert(table: str, data: dict, on_conflict: str):
-    h = {**HEADERS, "Prefer": f"resolution=merge-duplicates,return=representation"}
+    h = {**HEADERS, "Prefer": "resolution=merge-duplicates,return=representation"}
     with httpx.Client() as c:
         r = c.post(_url(table), headers=h, json=data, params={"on_conflict": on_conflict})
         r.raise_for_status()
@@ -50,46 +54,34 @@ def db_patch(table: str, params: dict, data: dict):
         r = c.patch(_url(table), headers=HEADERS, params=params, json=data)
         r.raise_for_status()
 
-def db_insert(table: str, data: dict):
-    with httpx.Client() as c:
-        r = c.post(_url(table), headers=HEADERS, json=data)
-        r.raise_for_status()
-
 
 # ══════════════════════════════════════════════════════════════════════════════
 # STUDY HOURS HELPERS
 # ══════════════════════════════════════════════════════════════════════════════
 
 def get_weekly_leaderboard(week: int, year: int) -> list:
-    """Get top 10 users for a specific week."""
     rows = db_get("study_hours", {
         "week": f"eq.{week}",
         "year": f"eq.{year}",
         "select": "user_id,seconds"
     })
-    # Aggregate by user
     totals = {}
     for r in rows:
         uid = r["user_id"]
         totals[uid] = totals.get(uid, 0) + r["seconds"]
 
-    # Also add lion import base for this week if it's the current week
     now = datetime.now(IST)
-    current_week = now.isocalendar()[1]
-    current_year = now.year
-    if week == current_week and year == current_year:
+    if week == now.isocalendar()[1] and year == now.year:
         lion_rows = db_get("lion_import", {"select": "user_id,weekly_seconds"})
         for r in lion_rows:
             if r.get("weekly_seconds"):
                 uid = r["user_id"]
                 totals[uid] = totals.get(uid, 0) + r["weekly_seconds"]
 
-    sorted_users = sorted(totals.items(), key=lambda x: x[1], reverse=True)
-    return sorted_users[:10]
+    return sorted(totals.items(), key=lambda x: x[1], reverse=True)[:10]
 
 
 def get_monthly_leaderboard(month: int, year: int) -> list:
-    """Get top 10 users for a specific month."""
     rows = db_get("study_hours", {
         "month": f"eq.{month}",
         "year":  f"eq.{year}",
@@ -100,7 +92,6 @@ def get_monthly_leaderboard(month: int, year: int) -> list:
         uid = r["user_id"]
         totals[uid] = totals.get(uid, 0) + r["seconds"]
 
-    # Add lion import base for current month
     now = datetime.now(IST)
     if month == now.month and year == now.year:
         lion_rows = db_get("lion_import", {"select": "user_id,monthly_seconds"})
@@ -109,15 +100,14 @@ def get_monthly_leaderboard(month: int, year: int) -> list:
                 uid = r["user_id"]
                 totals[uid] = totals.get(uid, 0) + r["monthly_seconds"]
 
-    sorted_users = sorted(totals.items(), key=lambda x: x[1], reverse=True)
-    return sorted_users[:10]
+    return sorted(totals.items(), key=lambda x: x[1], reverse=True)[:10]
 
 
 def upsert_study_seconds(user_id: str, seconds: int):
-    """Add study seconds for today."""
+    """Insert a new row each session — query sums them all."""
     now = datetime.now(IST)
     iso = now.isocalendar()
-    db_upsert("study_hours", {
+    db_insert("study_hours", {
         "user_id":  user_id,
         "guild_id": str(GUILD_ID),
         "date":     now.date().isoformat(),
@@ -125,14 +115,13 @@ def upsert_study_seconds(user_id: str, seconds: int):
         "week":     iso[1],
         "month":    now.month,
         "year":     now.year,
-    }, on_conflict="user_id,date")
+    })
 
 
 # ══════════════════════════════════════════════════════════════════════════════
 # ACTIVE SESSION TRACKING (in-memory)
 # ══════════════════════════════════════════════════════════════════════════════
 
-# { member_id: join_timestamp }
 active_sessions: dict[int, datetime] = {}
 
 def session_join(member_id: int):
@@ -151,37 +140,52 @@ def session_leave(member_id: int):
 # LEADERBOARD EMBED BUILDER
 # ══════════════════════════════════════════════════════════════════════════════
 
-MEDALS = ["🥇", "🥈", "🥉", "4️⃣", "5️⃣", "6️⃣", "7️⃣", "8️⃣", "9️⃣", "🔟"]
-
 def seconds_to_hm(seconds: int) -> str:
     h = seconds // 3600
     m = (seconds % 3600) // 60
-    if h and m:
-        return f"{h}h {m}m"
-    elif h:
-        return f"{h}h"
-    else:
-        return f"{m}m"
+    if h >= 10: return f"{h}h"
+    elif h:     return f"{h}h {m}m"
+    else:       return f"{m}m"
 
 
-async def build_leaderboard_embed(bot, entries: list, title: str, period: str, kind=None) -> discord.Embed:
-    e = discord.Embed(title=title, color=0x5865F2,
-                      timestamp=datetime.now(timezone.utc))
+async def build_leaderboard_embed(bot, entries: list, title: str, period: str, kind: str = "weekly") -> discord.Embed:
+    e = discord.Embed(title=title, color=0x5865F2, timestamp=datetime.now(timezone.utc))
     e.set_footer(text=f"Period: {period}")
 
     if not entries:
         e.description = "No study data yet for this period!"
         return e
 
-    lines = []
-    for i, (uid, secs) in enumerate(entries):
-        medal = MEDALS[i] if i < len(MEDALS) else f"`{i+1}.`"
+    if kind == "weekly":
+        congrats = "Amazing work this week! Congrats to our top studiers 🎉"
+    else:
+        congrats = "A grand month of studying! Bow down to our champions 👑"
+
+    users = []
+    for uid, secs in entries:
         try:
             user = await bot.fetch_user(int(uid))
+            mention = user.mention
             name = user.display_name
         except:
-            name = f"User {uid[:6]}..."
-        lines.append(f"{medal} **{name}** — `{seconds_to_hm(secs)}`")
+            mention = f"<@{uid}>"
+            name = f"User"
+        users.append((mention, name, secs))
+
+    lines = [f"*{congrats}*\n"]
+
+    # Podium top 3
+    podium_labels = ["👑 **1st Place**", "🥈 **2nd Place**", "🥉 **3rd Place**"]
+    for i in range(min(3, len(users))):
+        mention, name, secs = users[i]
+        lines.append(f"{podium_labels[i]} — {mention} `{seconds_to_hm(secs)}`")
+
+    # Rest 4-10
+    if len(users) > 3:
+        lines.append("\n**─── Rest of the Leaderboard ───**")
+        for i in range(3, len(users)):
+            mention, name, secs = users[i]
+            lines.append(f"`{i+1}.` {mention} — `{seconds_to_hm(secs)}`")
 
     e.description = "\n".join(lines)
     return e
@@ -203,10 +207,7 @@ async def leaderboard_scheduler():
         entries = get_weekly_leaderboard(iso[1], iso[0])
         period = f"Week {iso[1]}, {iso[0]}"
         embed = await build_leaderboard_embed(
-            bot_ref, entries,
-            "🏆 Weekly Study Leaderboard",
-            period, kind="weekly"
-        )
+            bot_ref, entries, "🏆 Weekly Study Leaderboard", period, kind="weekly")
         ch = bot_ref.get_channel(LEADERBOARD_CHANNEL_ID)
         if ch:
             await ch.send(embed=embed)
@@ -218,10 +219,7 @@ async def leaderboard_scheduler():
         entries = get_monthly_leaderboard(now.month, now.year)
         month_name = now.strftime("%B %Y")
         embed = await build_leaderboard_embed(
-            bot_ref, entries,
-            "📅 Monthly Study Leaderboard",
-            month_name, kind="monthly"
-        )
+            bot_ref, entries, "📅 Monthly Study Leaderboard", month_name, kind="monthly")
         ch = bot_ref.get_channel(LEADERBOARD_CHANNEL_ID)
         if ch:
             await ch.send(embed=embed)
@@ -236,191 +234,130 @@ async def before_scheduler():
 
 
 # ══════════════════════════════════════════════════════════════════════════════
-# CSV IMPORT COMMAND
+# COMMANDS
 # ══════════════════════════════════════════════════════════════════════════════
 
 def setup_commands(bot):
-    @bot.tree.command(
-        name="importcsv",
-        description="Import Lion bot CSV data (admin only). Attach the CSV file."
-    )
+
+    @bot.tree.command(name="importcsv", description="Import Lion bot CSV data (admin only). Attach the CSV file.")
     @app_commands.checks.has_permissions(administrator=True)
-    async def import_csv(interaction: discord.Interaction,
-                         type: str,
-                         file: discord.Attachment):
-        """
-        type: 'monthly' or 'weekly'
-        file: the CSV exported from Lion bot
-        """
+    async def import_csv(interaction: discord.Interaction, type: str, file: discord.Attachment):
         if type not in ("monthly", "weekly"):
-            return await interaction.response.send_message(
-                "❌ Type must be `monthly` or `weekly`", ephemeral=True)
-
+            return await interaction.response.send_message("❌ Type must be `monthly` or `weekly`", ephemeral=True)
         if not file.filename.endswith(".csv"):
-            return await interaction.response.send_message(
-                "❌ Please attach a `.csv` file.", ephemeral=True)
-
+            return await interaction.response.send_message("❌ Please attach a `.csv` file.", ephemeral=True)
         await interaction.response.defer(ephemeral=True)
-
         try:
             content = await file.read()
             text = content.decode("utf-8")
             reader = csv.DictReader(io.StringIO(text))
-
             count = 0
             skipped = 0
             for row in reader:
-                uid = row.get("userid", "").strip()
-                raw = row.get("total_time", "").strip()
-
-                if not uid or raw == "None" or not raw:
+                # Accept both original Lion bot columns and renamed columns
+                uid = (row.get("userid") or row.get("user_id") or "").strip().strip("'")
+                raw = (row.get("total_time") or row.get("weekly_seconds") or row.get("monthly_seconds") or "").strip()
+                if not uid or raw in ("None", "none", "") or not raw:
                     skipped += 1
                     continue
-
                 try:
                     seconds = int(float(raw))
                 except ValueError:
                     skipped += 1
                     continue
-
                 if seconds <= 0:
                     skipped += 1
                     continue
-
                 field = "weekly_seconds" if type == "weekly" else "monthly_seconds"
-
-                # Upsert into lion_import
+                h = {**HEADERS, "Prefer": "resolution=merge-duplicates,return=representation"}
                 with httpx.Client() as c:
-                    h = {**HEADERS, "Prefer": "resolution=merge-duplicates,return=representation"}
-                    r = c.post(_url("lion_import"), headers=h, json={
-                        "user_id":   uid,
-                        "guild_id":  str(GUILD_ID),
-                        field:       seconds,
+                    c.post(_url("lion_import"), headers=h, json={
+                        "user_id":    uid,
+                        "guild_id":   str(GUILD_ID),
+                        field:        seconds,
                         "total_time": seconds,
                     }, params={"on_conflict": "user_id"})
-
-                    # If already exists, patch just the field
-                    if r.status_code == 409 or r.status_code == 200:
-                        c.patch(_url("lion_import"), headers=HEADERS,
-                                params={"user_id": f"eq.{uid}"},
-                                json={field: seconds})
+                    c.patch(_url("lion_import"), headers=HEADERS,
+                            params={"user_id": f"eq.{uid}"},
+                            json={field: seconds})
                 count += 1
-
             e = discord.Embed(title="✅ CSV Imported!", color=0x57F287)
-            e.add_field(name="Type",    value=f"`{type}`",     inline=True)
-            e.add_field(name="Imported", value=f"`{count}`",   inline=True)
-            e.add_field(name="Skipped", value=f"`{skipped}`",  inline=True)
+            e.add_field(name="Type",     value=f"`{type}`",   inline=True)
+            e.add_field(name="Imported", value=f"`{count}`",  inline=True)
+            e.add_field(name="Skipped",  value=f"`{skipped}`", inline=True)
             e.set_footer(text="Data saved to Supabase • Leaderboard will reflect this data")
             await interaction.followup.send(embed=e, ephemeral=True)
             print(f"✅ CSV import: {count} records, {skipped} skipped")
-
         except Exception as ex:
             print(f"❌ CSV import error: {ex}")
             await interaction.followup.send(f"❌ Import failed: `{ex}`", ephemeral=True)
 
     @import_csv.error
     async def import_csv_error(interaction, error):
-        await interaction.response.send_message(
-            "❌ You need **Administrator** permission.", ephemeral=True)
+        await interaction.response.send_message("❌ You need **Administrator** permission.", ephemeral=True)
 
-    # Manual leaderboard post command
-    @bot.tree.command(
-        name="leaderboard",
-        description="Manually post the leaderboard (admin only)"
-    )
+
+    @bot.tree.command(name="leaderboard", description="Post the leaderboard publicly (admin only)")
     @app_commands.checks.has_permissions(administrator=True)
     async def post_leaderboard(interaction: discord.Interaction, type: str):
-        """type: 'weekly' or 'monthly'"""
         if type not in ("weekly", "monthly"):
-            return await interaction.response.send_message(
-                "❌ Type must be `weekly` or `monthly`", ephemeral=True)
-
+            return await interaction.response.send_message("❌ Type must be `weekly` or `monthly`", ephemeral=True)
         await interaction.response.defer(ephemeral=True)
-
         now = datetime.now(IST)
         try:
             if type == "weekly":
                 iso = now.isocalendar()
                 entries = get_weekly_leaderboard(iso[1], iso[0])
                 period = f"Week {iso[1]}, {iso[0]}"
-                embed = await build_leaderboard_embed(
-                    bot_ref, entries, "🏆 Weekly Study Leaderboard", period, kind="weekly")
+                embed = await build_leaderboard_embed(bot_ref, entries, "🏆 Weekly Study Leaderboard", period, kind="weekly")
             else:
                 entries = get_monthly_leaderboard(now.month, now.year)
                 period = now.strftime("%B %Y")
-                embed = await build_leaderboard_embed(
-                    bot_ref, entries, "📅 Monthly Study Leaderboard", period, kind="monthly")
-
+                embed = await build_leaderboard_embed(bot_ref, entries, "📅 Monthly Study Leaderboard", period, kind="monthly")
             ch = bot_ref.get_channel(LEADERBOARD_CHANNEL_ID)
             if ch:
                 await ch.send(embed=embed)
             await interaction.followup.send("✅ Leaderboard posted!", ephemeral=True)
-
         except Exception as ex:
             print(f"❌ leaderboard error: {ex}")
             await interaction.followup.send(f"❌ Failed: `{ex}`", ephemeral=True)
 
     @post_leaderboard.error
     async def leaderboard_error(interaction, error):
-        await interaction.response.send_message(
-            "❌ You need **Administrator** permission.", ephemeral=True)
+        await interaction.response.send_message("❌ You need **Administrator** permission.", ephemeral=True)
 
 
-
-    @bot.tree.command(
-        name="adminleaderboard",
-        description="View full weekly + monthly leaderboard with all members (admin only)"
-    )
+    @bot.tree.command(name="adminleaderboard", description="View full weekly + monthly leaderboard — all members (admin only)")
     @app_commands.checks.has_permissions(administrator=True)
     async def admin_leaderboard(interaction: discord.Interaction):
         await interaction.response.defer(ephemeral=True)
         now = datetime.now(IST)
         iso = now.isocalendar()
-
         try:
-            # ── Weekly (all members) ──────────────────────────────────────────
-            weekly_rows = db_get("study_hours", {
-                "week": f"eq.{iso[1]}",
-                "year": f"eq.{iso[0]}",
-                "select": "user_id,seconds"
-            })
+            weekly_rows = db_get("study_hours", {"week": f"eq.{iso[1]}", "year": f"eq.{iso[0]}", "select": "user_id,seconds"})
             weekly_totals = {}
             for r in weekly_rows:
                 uid = r["user_id"]
                 weekly_totals[uid] = weekly_totals.get(uid, 0) + r["seconds"]
 
-            lion_rows = db_get("lion_import", {"select": "user_id,weekly_seconds,monthly_seconds"})
-            lion_map = {r["user_id"]: r for r in lion_rows}
-
-            for uid, r in lion_map.items():
-                if r.get("weekly_seconds"):
-                    weekly_totals[uid] = weekly_totals.get(uid, 0) + r["weekly_seconds"]
-
-            weekly_sorted = sorted(weekly_totals.items(), key=lambda x: x[1], reverse=True)
-
-            # ── Monthly (all members) ─────────────────────────────────────────
-            monthly_rows = db_get("study_hours", {
-                "month": f"eq.{now.month}",
-                "year":  f"eq.{now.year}",
-                "select": "user_id,seconds"
-            })
+            monthly_rows = db_get("study_hours", {"month": f"eq.{now.month}", "year": f"eq.{now.year}", "select": "user_id,seconds"})
             monthly_totals = {}
             for r in monthly_rows:
                 uid = r["user_id"]
                 monthly_totals[uid] = monthly_totals.get(uid, 0) + r["seconds"]
 
-            for uid, r in lion_map.items():
+            lion_rows = db_get("lion_import", {"select": "user_id,weekly_seconds,monthly_seconds"})
+            for r in lion_rows:
+                uid = r["user_id"]
+                if r.get("weekly_seconds"):
+                    weekly_totals[uid] = weekly_totals.get(uid, 0) + r["weekly_seconds"]
                 if r.get("monthly_seconds"):
                     monthly_totals[uid] = monthly_totals.get(uid, 0) + r["monthly_seconds"]
 
+            weekly_sorted  = sorted(weekly_totals.items(),  key=lambda x: x[1], reverse=True)
             monthly_sorted = sorted(monthly_totals.items(), key=lambda x: x[1], reverse=True)
 
-            # ── Build weekly embed ────────────────────────────────────────────
-            e1 = discord.Embed(
-                title=f"📊 Admin — Weekly Leaderboard (Week {iso[1]})",
-                color=0xFEE75C,
-                timestamp=datetime.now(timezone.utc)
-            )
+            e1 = discord.Embed(title=f"📊 Admin Weekly — Week {iso[1]}, {iso[0]}", color=0xFEE75C, timestamp=datetime.now(timezone.utc))
             w_lines = []
             for i, (uid, secs) in enumerate(weekly_sorted):
                 try:
@@ -430,14 +367,9 @@ def setup_commands(bot):
                     name = f"<@{uid}>"
                 w_lines.append(f"`{i+1}.` **{name}** — `{seconds_to_hm(secs)}`")
             e1.description = "\n".join(w_lines) if w_lines else "No data yet."
-            e1.set_footer(text=f"Week {iso[1]}, {iso[0]} • {len(weekly_sorted)} members")
+            e1.set_footer(text=f"{len(weekly_sorted)} members tracked")
 
-            # ── Build monthly embed ───────────────────────────────────────────
-            e2 = discord.Embed(
-                title=f"📊 Admin — Monthly Leaderboard ({now.strftime('%B %Y')})",
-                color=0xEB459E,
-                timestamp=datetime.now(timezone.utc)
-            )
+            e2 = discord.Embed(title=f"📊 Admin Monthly — {now.strftime('%B %Y')}", color=0xEB459E, timestamp=datetime.now(timezone.utc))
             m_lines = []
             for i, (uid, secs) in enumerate(monthly_sorted):
                 try:
@@ -447,18 +379,16 @@ def setup_commands(bot):
                     name = f"<@{uid}>"
                 m_lines.append(f"`{i+1}.` **{name}** — `{seconds_to_hm(secs)}`")
             e2.description = "\n".join(m_lines) if m_lines else "No data yet."
-            e2.set_footer(text=f"{now.strftime('%B %Y')} • {len(monthly_sorted)} members")
+            e2.set_footer(text=f"{len(monthly_sorted)} members tracked")
 
             await interaction.followup.send(embeds=[e1, e2], ephemeral=True)
-
         except Exception as ex:
             print(f"❌ adminleaderboard error: {ex}")
             await interaction.followup.send(f"❌ Failed: `{ex}`", ephemeral=True)
 
     @admin_leaderboard.error
     async def admin_leaderboard_error(interaction, error):
-        await interaction.response.send_message(
-            "❌ You need **Administrator** permission.", ephemeral=True)
+        await interaction.response.send_message("❌ You need **Administrator** permission.", ephemeral=True)
 
 
 # ══════════════════════════════════════════════════════════════════════════════
