@@ -70,15 +70,27 @@ def get_weekly_leaderboard(week: int, year: int) -> list:
         uid = r["user_id"]
         totals[uid] = totals.get(uid, 0) + r["seconds"]
 
+    print(f"📊 study_hours rows: {len(rows)}, unique users: {len(totals)}")
+    for uid, secs in list(totals.items())[:3]:
+        print(f"  study_hours user {uid}: {secs}s")
+
     now = datetime.now(IST)
     if week == now.isocalendar()[1] and year == now.year:
         lion_rows = db_get("lion_import", {"select": "user_id,weekly_seconds"})
+        print(f"📊 lion_import rows: {len(lion_rows)}")
         for r in lion_rows:
             if r.get("weekly_seconds"):
                 uid = r["user_id"]
-                totals[uid] = totals.get(uid, 0) + r["weekly_seconds"]
+                before = totals.get(uid, 0)
+                totals[uid] = before + r["weekly_seconds"]
+                print(f"  lion user {uid}: +{r['weekly_seconds']}s (was {before}s, now {totals[uid]}s)")
 
-    return sorted(totals.items(), key=lambda x: x[1], reverse=True)[:10]
+    print(f"📊 Final top 3:")
+    sorted_all = sorted(totals.items(), key=lambda x: x[1], reverse=True)
+    for uid, secs in sorted_all[:3]:
+        print(f"  {uid}: {secs}s = {secs//3600}h {(secs%3600)//60}m")
+
+    return sorted_all[:10]
 
 
 def get_monthly_leaderboard(month: int, year: int) -> list:
